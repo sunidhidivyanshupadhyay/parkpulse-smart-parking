@@ -1,0 +1,129 @@
+name: Health Monitor
+
+on:
+  schedule:
+    # Runs every 30 minutes
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL to check (leave blank to use SITE_URL secret)'
+        required: false
+
+jobs:
+  health-check:
+    name: Site Health Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set target URL
+        id: set-url
+        run: |
+          if [ -n "${{ github.event.inputs.url }}" ]; then
+            echo "url=${{ github.event.inputs.url }}" >> $GITHUB_OUTPUT
+          else
+            echo "url=${{ secrets.SITE_URL }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check site availability
+        id: health
+        run: |
+          URL="${{ steps.set-url.outputs.url }}"
+          echo "Checking: $URL"
+
+          RESPONSE=$(curl -o /dev/null -s -w "%{http_code}|%{time_total}|%{time_connect}" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 5 \
+            "$URL")
+
+          HTTP_CODE=$(echo $RESPONSE | cut -d'|' -f1)
+          TIME_TOTAL=$(echo $RESPONSE | cut -d'|' -f2)
+          TIME_CONNECT=$(echo $RESPONSE | cut -d'|' -f3)
+
+          echo "http_code=$HTTP_CODE"     >> $GITHUB_OUTPUT
+          echo "time_total=$TIME_TOTAL"   >> $GITHUB_OUTPUT
+          echo "time_connect=$TIME_CONNECT" >> $GITHUB_OUTPUT
+
+          echo "### 🩺 Health Check Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌐 URL | $URL |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📡 HTTP Status | $HTTP_CODE |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⏱️ Response Time | ${TIME_TOTAL}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔌 Connect Time | ${TIME_CONNECT}s |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+            echo "status=healthy" >> $GITHUB_OUTPUT
+            echo "| ✅ Status | Healthy |" >> $GITHUB_STEP_SUMMARY
+            echo "✅ Site is healthy (HTTP $HTTP_CODE, ${TIME_TOTAL}s)"
+          else
+            echo "status=unhealthy" >> $GITHUB_OUTPUT
+            echo "| ❌ Status | Unhealthy |" >> $GITHUB_STEP_SUMMARY
+            echo "❌ Site is unhealthy (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+      - name: Check response time threshold
+        run: |
+          TIME="${{ steps.health.outputs.time_total }}"
+          THRESHOLD=5.0
+
+          # Compare using awk
+          SLOW=$(awk "BEGIN { print ($TIME > $THRESHOLD) ? \"yes\" : \"no\" }")
+
+          if [ "$SLOW" = "yes" ]; then
+            echo "⚠️ Warning: Response time ${TIME}s exceeds threshold ${THRESHOLD}s"
+            echo "::warning::Slow response time: ${TIME}s (threshold: ${THRESHOLD}s)"
+          else
+            echo "✅ Response time ${TIME}s is within threshold ${THRESHOLD}s"
+          fi
+
+      - name: Create GitHub Issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const url = "${{ steps.set-url.outputs.url }}";
+            const httpCode = "${{ steps.health.outputs.http_code }}";
+            const timeTotal = "${{ steps.health.outputs.time_total }}";
+            const now = new Date().toISOString();
+
+            // Check for existing open health alert issue
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'health-alert'
+            });
+
+            if (issues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🚨 Site Health Alert — ${now}`,
+                body: [
+                  '## 🚨 Site Health Check Failed',
+                  '',
+                  `**Time:** ${now}`,
+                  `**URL:** ${url}`,
+                  `**HTTP Status:** ${httpCode}`,
+                  `**Response Time:** ${timeTotal}s`,
+                  '',
+                  '### What to do',
+                  '1. Check the [Netlify dashboard](https://app.netlify.com) for failed deploys',
+                  '2. Review [GitHub Actions logs](' + context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions)',
+                  '3. Verify the site URL is correct in the `SITE_URL` secret',
+                  '',
+                  '_This issue was automatically created by the Health Monitor workflow._'
+                ].join('\n'),
+                labels: ['health-alert', 'bug']
+              });
+              console.log('Created health alert issue');
+            } else {
+              console.log('Health alert issue already exists, skipping creation');
+            }
