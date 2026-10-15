@@ -1,0 +1,6 @@
+{
+  "name": "ParkPulse - Smart Parking Management System",
+  "description": "Enterprise-grade smart parking management system with Dijkstra shortest-path navigation, waiting queue management, real-time availability, vehicle entry/exit tracking, and analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
